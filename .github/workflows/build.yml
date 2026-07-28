@@ -2,11 +2,14 @@ name: build-scan-push
 
 on:
   push:
-    branches: [main]
+    # Triggers on push to any branch EXCEPT main (e.g. dev, feature/*, fix/*)
+    branches-ignore:
+      - 'main'
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
+  pull-requests: write
 
 env:
   GCP_PROJECT_ID: 'siem-486017'
@@ -41,7 +44,6 @@ jobs:
           password: ${{ steps.auth.outputs.access_token }}
 
       # 3. Build Docker Image
-      # Note: If Dockerfile is inside a subfolder (e.g. app/Dockerfile), change "." to "./app"
       - name: Build image
         run: |
           docker build \
@@ -49,7 +51,7 @@ jobs:
 
       # 4. Security Scan with Trivy
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.30.0
         with:
           image-ref: ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           severity: CRITICAL,HIGH
@@ -59,3 +61,21 @@ jobs:
       - name: Push image
         run: |
           docker push ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      # 6. Raise a Pull Request to merge into `main`
+      - name: Create Pull Request to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Checks if a PR already exists from this branch to main to avoid duplicate PR errors
+          EXISTING_PR=$(gh pr list --head "${{ github.ref_name }}" --base main --json number --jq '.[0].number')
+          
+          if [ -z "$EXISTING_PR" ]; then
+            gh pr create \
+              --base main \
+              --head "${{ github.ref_name }}" \
+              --title "Automated Build: Merge ${{ github.ref_name }} into main" \
+              --body "Automated PR created following successful build, Trivy security scan, and GAR push for commit \`${{ github.sha }}\`."
+          else
+            echo "Pull request already exists: PR #${EXISTING_PR}"
+          fi
